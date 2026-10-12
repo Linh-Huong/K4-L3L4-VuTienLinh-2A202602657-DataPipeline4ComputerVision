@@ -4,15 +4,15 @@
 
 | | |
 |---|---|
-| Họ và tên | `<điền>` |
-| MSSV (đúng bằng `LAB_STUDENT_ID` trong `.env`) | `<điền>` |
-| GitHub | `<điền: tên tài khoản>` |
-| Trip dùng cho bài tập sập và chạy lại (xem GUIDE, bước 5) | `<điền: trip-xxxxx>` |
+| Họ và tên | Vũ Tiến Linh |
+| MSSV (đúng bằng `LAB_STUDENT_ID` trong `.env`) | `2A202602657` |
+| GitHub | `Linh-Huong` |
+| Trip dùng cho bài tập sập và chạy lại (xem GUIDE, bước 5) | `trip-07900` |
 
 ## Kết quả cuối
 
-- `dataset_version` của bạn: `<điền>`  (phải khớp `report/evidence/run_summary.json`)
-- Số khung hình train / val / test của bạn: `<điền>`
+- `dataset_version` của bạn: `2c2f205f5c69`  (phải khớp `report/evidence/run_summary.json`)
+- Số khung hình train / val / test của bạn: `train: 667 / val: 176 / test: 176 (tổng: 1019 khung hình)`
 - `report/verify.txt`: tạo bằng `python3 scripts/check_submission.py --save-verify` (phải có `27/27 checks passed`).
 - Ảnh chụp trong `report/screenshots/`: `airflow_graph.png`, `minio_lake.png`, `metabase_dashboard.png`, và ảnh bài tập sập/chạy lại (log task đỏ thấy trip của bạn).
 
@@ -21,7 +21,16 @@
 ### Câu 1
 Liệt kê **ít nhất 4 khác biệt** giữa telemetry nguồn A và nguồn B mà bạn thấy ở bronze. Vì sao pipeline giữ **mỗi nguồn một bảng bronze** và để mọi cột ở dạng chữ, thay vì gộp và ép kiểu ngay?
 
-(trả lời ở đây)
+Bốn khác biệt chính giữa telemetry nguồn A và nguồn B được ghi nhận ở Bronze:
+1. **Tên cột**: Nguồn A dùng `ts_utc`, `speed_mps`, `heading_deg`, `lat`, `lon`, `alt_m`, `gas`, `brake`, `steer`. Nguồn B đặt tên khác hoàn toàn: `timestamp_ms`, `spd_kmh`, `hdg`, `latitude`, `longitude`, `altitude`, `throttle_pct`, `brake_pct`, `steering`.
+2. **Đơn vị đo**: Tốc độ nguồn A đo bằng mét/giây (`m/s`), bàn đạp ga/phanh theo khoảng `[0.0, 1.0]`. Nguồn B đo tốc độ bằng `km/h`, bàn đạp đo theo phần trăm `0 - 100%`.
+3. **Định dạng thời gian**: Nguồn A dùng chuỗi chuẩn ISO-8601 UTC (`2025-10-07T08:00:00.014Z`), trong khi nguồn B dùng Unix epoch timestamp tính bằng mili-giây (`1759933801509`).
+4. **Độ lệch đồng hồ (Clock Drift)**: Nguồn B bị lệch đồng hồ 1500 ms (1.5 giây) so với trục thời gian video, trong khi nguồn A đồng bộ trực tiếp. Ngoài ra, số lượng dòng thô cũng khác nhau (A có 3021 dòng, B có 3234 dòng).
+
+**Lý do giữ mỗi nguồn một bảng và để mọi cột dạng chữ:**
+- Tầng Bronze tuân thủ nguyên tắc Medallion (ghi nguyên bản, append-only): dữ liệu từ nhà cung cấp/thiết bị phải được lưu lại trung thực 100% để làm nguồn chân lý duy nhất (Single Source of Truth).
+- Tránh sập pipeline do Schema Drift: Nếu ép kiểu ngay tại Ingestion, một giá trị rác, ô trống hay lỗi định dạng sẽ làm gãy pipeline và mất dữ liệu. Lưu dạng chuỗi đảm bảo quá trình nhận dữ liệu luôn thành công (land safely).
+- Tách bạch trách nhiệm (Separation of Concerns): Tầng Bronze tập trung lưu trữ an toàn, còn việc chuẩn hóa schema, ép kiểu và xử lý chất lượng được chuyển sang tầng Silver (thực hiện bằng dbt và DuckDB). Điều này cho phép dễ dàng re-process/replay dữ liệu bất cứ lúc nào mà không cần thu thập lại từ nguồn.
 
 ## Bước 2 · Silver telemetry
 

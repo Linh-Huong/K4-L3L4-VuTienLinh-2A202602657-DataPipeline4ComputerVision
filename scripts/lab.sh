@@ -1,4 +1,5 @@
 #!/bin/bash
+export MSYS_NO_PATHCONV=1
 # Lệnh ngắn cho bài lab (chạy trên máy của bạn, thực thi trong container Airflow đang chạy).
 #   scripts/lab.sh step <1..5|all> [--reset]   chạy TỪNG cấu phần, in kết quả và kiểm tra (step all = cả pipeline)
 #   scripts/lab.sh exp <idempotency|break-gate|leakage|threshold>   thí nghiệm, ghi bằng chứng vào report/evidence/
