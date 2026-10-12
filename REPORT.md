@@ -170,21 +170,59 @@ Vì sao `dataset_version` là **băm nội dung** chứ không phải ngày gi�
 ### Câu 9
 Mô tả chính xác điều xảy ra khi trip của bạn sập rồi chạy lại: bao nhiêu task chuyển đỏ, bao nhiêu task `upstream_failed`, bạn clear gì, dữ liệu có nhân đôi không, `dataset_version` có đổi không? Bằng chứng (ảnh, số) là gì?
 
-(trả lời ở đây)
+**Hiện tượng khi trip `trip-07900` bị sập giả lập (`LAB_FAIL_ONCE=trip-07900`):**
+- **Số task chuyển đỏ (`failed`)**: Đúng **1 task duy nhất** chuyển đỏ là task dynamic map `silver_frames` tại map index 21 (`trip-07900`, ứng với `2A202602657 % 26 = 21`). Log task ghi rõ ngoại lệ: `RuntimeError: simulated crash while extracting trip-07900; run it again`.
+- **Số task chuyển `upstream_failed`**: Đúng **7 task downstream** chuyển sang trạng thái `upstream_failed` do phụ thuộc vào kết quả của toàn bộ 26 task `silver_frames`: `dbt_run_silver`, `dbt_test_silver`, `dbt_run_gold`, `dbt_test_gold`, `publish_lake`, `export_dataset`, và `publish_warehouse`. Trong khi đó, 25 task map index còn lại của `silver_frames` và các task bronze phía trước đều chạy thành công (`success`).
+- **Thao tác phục hồi (Clear)**: Trong giao diện Airflow (hoặc CLI), **chỉ clear duy nhất 1 task đỏ** (`silver_frames` tại map index 21). Sau khi clear, Airflow tự động lập lịch chạy lại task này (lần chạy thứ 2 không còn gặp flag `.failed-trip-07900`), và lần lượt kích hoạt 7 task downstream đã từng bị `upstream_failed`, đưa toàn bộ DAG về màu xanh (`success`).
+- **Dữ liệu có nhân đôi không**: **Hoàn toàn không nhân đôi**. Bằng chứng: Tổng số khung hình trong `silver.frames` vẫn giữ nguyên 1246 khung hình, số khung hình trong `marts.mart_frame_gallery` và gold dataset vẫn chính xác là **1019 khung hình**. Điều này đạt được nhờ cơ chế Idempotent Partition Overwrite trong Delta Lake (`replace_where=f"trip_id = '{trip_id}'"`), ghi đè nguyên vẹn partition của `trip-07900` thay vì append chồng lên.
+- **`dataset_version` có đổi không**: **Không đổi**, vẫn giữ nguyên tuyệt đối là `2c2f205f5c69` (trùng khớp với manifest và `run_summary.json`).
+- **Bằng chứng**:
+  - Ảnh chụp lỗi và log crash: [`report/screenshots/airflow_task_crash.png`](file:///e:/VinUnni/12-10/K4-L3L4-VuTienLinh-2A202602657-DataPipeline4ComputerVision/report/screenshots/airflow_task_crash.png) và [`report/screenshots/airflow_task_crash_log.png`](file:///e:/VinUnni/12-10/K4-L3L4-VuTienLinh-2A202602657-DataPipeline4ComputerVision/report/screenshots/airflow_task_crash_log.png).
+  - Ảnh chụp DAG xanh toàn bộ sau khi clear: [`report/screenshots/airflow_graph.png`](file:///e:/VinUnni/12-10/K4-L3L4-VuTienLinh-2A202602657-DataPipeline4ComputerVision/report/screenshots/airflow_graph.png).
+  - Kết quả kiểm tra xác thực: `scripts/lab.sh verify` vượt qua **27/27** tiêu chí.
 
 ### Câu 10
 Nâng từ 2 drive lên **500 xe mỗi ngày**: ba thành phần nào của pipeline này sẽ vỡ đầu tiên, và bạn thay bằng gì (nối với slide 12, 22, 23)?
 
-(trả lời ở đây)
+Khi mở rộng quy mô từ 2 drive mẫu lên 500 xe chạy hàng ngày (~hàng nghìn giờ video và hàng trăm triệu bản ghi cảm biến), ba thành phần sẽ quá tải và sập đầu tiên:
+1. **Giải mã và trích xuất video đơn node (Single-node FFmpeg / Airflow LocalExecutor)**:
+   - *Điểm nghẽn*: `extract_trip()` giải mã MP4 và tính toán perceptual hash/Laplacian trên một container Airflow duy nhất dùng LocalExecutor (giới hạn 2 worker song song). Với 500 xe, CPU, RAM và Disk I/O cục bộ sẽ nghẽn nghiêm trọng, thời gian trích xuất kéo dài hàng chục giờ và dễ bị OOM kill.
+   - *Giải pháp thay thế*: Chuyển sang mô hình điều phối phân tán với Airflow CeleryExecutor hoặc KubernetesExecutor (mỗi task chạy trong 1 pod riêng biệt trên K8s), hoặc sử dụng framework tính toán phân tán chuyên biệt cho CV/Media như **Ray** hoặc **Apache Spark** kết hợp bộ giải mã GPU (NVIDIA DALI/NVDEC) đọc trực tiếp từ Object Storage (slide 12, 22).
+2. **Động cơ phân tích đơn tiến trình DuckDB (Single-node DuckDB & Local File Delta ACID)**:
+   - *Điểm nghẽn*: DuckDB chạy in-process và ghi metadata vào file `.duckdb` trên ổ cứng cục bộ. Mặc dù tối ưu xuất sắc cho phân tích cá nhân (< 50 GB), nhưng DuckDB không hỗ trợ ghi song song phân tán (distributed concurrent writes) từ hàng trăm máy chủ đồng thời, và sẽ quá tải RAM khi bảng telemetry vượt qua hàng trăm triệu dòng.
+   - *Giải pháp thay thế*: Chuyển đổi toàn diện sang kiến trúc **Lakehouse phân tán**: Sử dụng **Apache Spark** / **Trino** kết hợp định dạng mở **Delta Lake** hoặc **Apache Iceberg** lưu trên Cloud Object Storage (Amazon S3 / Google Cloud Storage), và đưa tầng Marts/Phục vụ vào các Cloud Data Warehouse phân tán quy mô lớn như **Snowflake**, **Google BigQuery** hoặc **ClickHouse** (slide 22, 23).
+3. **Cơ chế Ingestion Telemetry dạng lô và đồng bộ đồng hồ thủ công (Batch Telemetry & Hardcoded Clock Alignment)**:
+   - *Điểm nghẽn*: Hiện tại dữ liệu telemetry được import bằng file CSV theo lô khi xe về bãi và xử lý lệch giờ bằng mã cố định (`ts - 0.5s` cho drive B). Khi vận hành 500 xe thực tế, mỗi xe có độ lệch GPS/IMU và camera biến thiên theo thời gian (clock drift), mất kết nối mạng và độ trễ ngẫu nhiên (network jitter).
+   - *Giải pháp thay thế*: Xây dựng kiến trúc **Streaming Ingestion thời gian thực**: Xe đẩy dữ liệu telemetry liên tục qua **Apache Kafka** / **MQTT Broker**, xử lý làm sạch và căn chỉnh thời gian bằng Streaming Engine (**Apache Flink** / **Spark Streaming**) với thuật toán lọc nhiễu Kalman Filter / Dynamic Time Warping và chuẩn đồng hồ PTP (IEEE 1588), kết hợp kiểm định chất lượng tự động theo luồng trước khi sink vào Bronze/Silver (slide 12, 23).
 
 ## Câu hỏi riêng của bạn trên Metabase
 
 Câu SQL bạn thêm vào dashboard và điều nó cho biết:
 
-(trả lời ở đây)
+```sql
+SELECT 
+    drive_id,
+    trip_id,
+    lighting,
+    conditions,
+    frames AS total_frames,
+    frames_kept,
+    (frames - frames_kept) AS frames_dropped,
+    ROUND(100.0 * (frames - frames_kept) / NULLIF(frames, 0), 2) AS drop_rate_pct
+FROM marts.mart_trip_summary
+ORDER BY drop_rate_pct DESC;
+```
+
+**Ý nghĩa và insight câu truy vấn mang lại:**
+- **Mục đích**: Tính toán tỷ lệ khung hình bị loại bỏ (`drop_rate_pct`) của từng chuyến đi (trip), đồng thời phân rã theo điều kiện ánh sáng (`lighting`: Day/Night) và môi trường thời tiết (`conditions`: Clear/Clouds/Rain).
+- **Insight cho đội ngũ Computer Vision & Robot**:
+  - Nhận diện những trip có tỷ lệ thất thoát khung hình cao nhất (ví dụ các trip rung lắc nhiều hoặc ánh sáng yếu có tỷ lệ drop do mờ/nhiễu vượt trội so với mức trung bình).
+  - Giúp đội ngũ kỹ thuật đánh giá sự tương quan giữa điều kiện vận hành thực tế và chất lượng dữ liệu thu thập, từ đó đưa ra quyết định nâng cấp phần cứng (bổ sung đèn chiếu sáng phụ trợ, cân chỉnh giá đỡ chống rung camera) hoặc điều chỉnh ngưỡng heuristic (thresholds) cho phù hợp với từng mùa/thời tiết.
 
 ## Nhìn lại
 
 Điều bạn thấy bất ngờ nhất, điều gì còn chưa rõ, và một lỗi dữ liệu mà bạn nghĩ pipeline **chưa** bắt được (nếu có). Tối đa 8 dòng.
 
-(trả lời ở đây)
+1. **Điều bất ngờ nhất**: Việc chia tập dữ liệu ngẫu nhiên theo từng khung hình (frame-level split) gây ra rò rỉ dữ liệu (data leakage) tuyệt đối 100% (cả 26/26 trip đều bị xé lẻ vào cả Train và Test), chứng minh rằng mô hình Computer Vision có thể đạt điểm benchmark cao giả tạo chỉ nhờ học thuộc bối cảnh không gian thời gian lân cận.
+2. **Điều còn chưa rõ**: Phương pháp tối ưu để tự động học các ngưỡng heuristic (như ngưỡng mờ Laplacian 100 hay ngưỡng dHash Hamming distance 6) theo từng điều kiện môi trường cụ thể thay vì áp dụng một ngưỡng cứng (hardcoded threshold) cho toàn bộ hệ thống.
+3. **Lỗi dữ liệu pipeline chưa bắt được**: Hiện tượng lóa sáng cục bộ (lens flare do ánh sáng mặt trời chiếu trực diện hoặc đèn pha xe đối diện), giọt nước đọng trên ống kính khi trời mưa, và hiện tượng bóng phản chiếu của cabin xe trên kính chắn gió (windshield reflections) — những khung hình này không bị đen, không bị mờ toàn phần nhưng thông tin thị giác bị biến dạng nặng.
