@@ -120,17 +120,50 @@ Khung hình **đen** và khung hình **tối** khác nhau thế nào, pipeline x
 ### Câu 6
 Dựa vào `leakage.json`: chia theo khung hình làm bao nhiêu trip bị chia cắt, so với chia theo trip? Vì sao điều này làm điểm kiểm thử đẹp một cách giả tạo?
 
-(trả lời ở đây)
+**Số liệu từ `leakage.json` (trên tổng số 1019 khung hình hợp lệ thuộc 26 trip):**
+- **Chia theo khung hình (Random frame-level split 70/15/15)**: Có tới **26/26 trip bị chia cắt** (`per_frame_split_trips_straddling = 26`), và cả **26/26 trip đều có khung hình xuất hiện đồng thời ở cả tập Train lẫn tập Test** (`per_frame_split_trips_in_both_train_and_test = 26`). Tỷ lệ rò rỉ dữ liệu là 100%.
+- **Chia theo trip (Scene-level split của pipeline)**: Có đúng **0 trip bị chia cắt** (`per_trip_split_trips_straddling = 0`). Mỗi trip độc lập chỉ nằm trong duy nhất một split (Train, Val hoặc Test).
+
+**Vì sao điều này làm điểm kiểm thử đẹp một cách giả tạo (Data Leakage):**
+- Các khung hình trong cùng một chuyến đi (trip) được trích xuất cách nhau 0.5 giây có tính tự tương quan không gian - thời gian (spatiotemporal correlation) cực kỳ cao: góc nhìn camera, bối cảnh thời tiết, mặt đường, cây cối và các xe xung quanh gần như giống hệt nhau.
+- Nếu chia ngẫu nhiên theo khung hình, mô hình AI sẽ "học thuộc lòng" (memorize) khung hình ở thời điểm $t$ trong tập Train, rồi được đánh giá trên khung hình ở thời điểm $t + 0.5s$ trong tập Test. Điều này tương tự như việc học sinh "biết trước câu hỏi đề thi", khiến điểm số đánh giá (accuracy, loss) trên tập test cao giả tạo nhưng mô hình sẽ thất bại hoàn toàn (generalization failure) khi đưa ra chạy thực tế trên đường mới.
 
 ### Câu 7
 Vì sao `dataset_version` là **băm nội dung** chứ không phải ngày giờ hay số đếm? Hai lần chạy liên tiếp cho kết quả gì? Vì sao `dataset_version` của bạn **khác** bạn bè dù cùng dữ liệu (liên hệ MSSV)?
 
-(trả lời ở đây)
+**Vì sao `dataset_version` là băm nội dung (Content-addressed hash):**
+- **Đảm bảo tính tất định và tái lập (Determinism & Reproducibility)**: Băm nội dung đảm bảo tính idempotent. Khi dữ liệu đầu vào và quy tắc xử lý không đổi, dù chạy lại bao nhiêu lần, ở bất kỳ thời điểm nào hay trên máy nào cũng đều sinh ra cùng một mã băm (`2c2f205f5c69`).
+- **Tránh tạo phiên bản "ma" (Ghost versioning)**: Nếu dùng timestamp hoặc số đếm tăng dần, mỗi lần rerun hoặc backfill pipeline sẽ sinh ra một version mới dù dữ liệu bên trong giống hệt, gây lãng phí bộ nhớ lưu trữ và gây nhầm lẫn cho kỹ sư huấn luyện mô hình. Băm nội dung giúp tự động deduplicate và chỉ sinh version mới khi dữ liệu thực sự thay đổi.
+
+**Kết quả hai lần chạy liên tiếp:**
+- Hai lần chạy liên tiếp với cùng dữ liệu và cùng MSSV cho kết quả giống hệt nhau: `dataset_version` giữ nguyên là `2c2f205f5c69`.
+
+**Vì sao `dataset_version` khác bạn bè dù cùng dữ liệu gốc:**
+- Trong model `gold_dataset_frames.sql`, pipeline sử dụng MSSV (`LAB_STUDENT_ID = 2A202602657`) làm salt để sắp xếp thứ tự trip trước khi chia split: `md5(trip_id || '{{ env_var("LAB_STUDENT_ID", "") }}')`.
+- Vì mỗi sinh viên có MSSV riêng, thứ tự gán split train/val/test cho 26 trip là khác nhau, dẫn đến danh sách các khung hình trong từng split khác nhau. Do `dataset_version` là mã băm từ nội dung của manifest, nên mỗi sinh viên sẽ sở hữu một `dataset_version` duy nhất.
 
 ### Câu 8
 Đọc phần `lineage` trong `manifest.json` của dataset bạn. Trả lời "dataset này được tạo từ dữ liệu nào?" bằng chính nội dung đó. Nếu một người hỏi 3 tháng sau, thông tin nào giúp tái tạo lại đúng dataset này?
 
-(trả lời ở đây)
+**Dataset `2c2f205f5c69` được tạo từ các dữ liệu cụ thể (theo `lineage`):**
+- Hai file video camera gốc có mã băm SHA-256:
+  - `drive_a`: `636ba1a98dfc5ba665d1c935e1d2064e69f4df360ff9ffbd15795957d5e7e9aa`
+  - `drive_b`: `bfa62703f645ff77a8578ae3fc74a00881140d38a404d43c8e2af265bbee9fdc`
+- Các phiên bản commit cụ thể của các bảng Delta nguồn:
+  - `bronze.raw_telemetry_a`: version 0
+  - `bronze.raw_telemetry_b`: version 0
+  - `bronze.trips_raw`: version 0
+  - `bronze.video_files`: version 1
+  - `silver.frames`: version 79
+  - `silver.telemetry`: version 2
+  - `silver.frames_flagged`: version 2
+  - `silver.frame_telemetry`: version 2
+
+**Thông tin giúp tái tạo chính xác dataset này sau 3 tháng:**
+1. **Mã băm SHA-256 của video gốc và telemetry**: Dùng đối chiếu xác nhận dữ liệu thô ban đầu không bị biến đổi.
+2. **Số phiên bản commit (Commit version) của các bảng Delta**: Nhờ tính năng Time Travel của Delta Lake, ta có thể truy vấn ngược dữ liệu chính xác tại thời điểm commit đó (`VERSION AS OF 2` hoặc `AS OF 79`).
+3. **Mã MSSV (`LAB_STUDENT_ID = 2A202602657`)**: Để tái lập lại đúng hạt giống (salt) phân chia split các trip.
+4. **Bộ quy tắc trích xuất và lọc (Rules)** ghi trong manifest (`drop: is_black, is_blurry, is_near_dup, not sync_ok`) và commit Git của mã nguồn pipeline.
 
 ## Bước 5 · Điều phối và phục vụ
 
