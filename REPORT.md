@@ -37,12 +37,48 @@ Bốn khác biệt chính giữa telemetry nguồn A và nguồn B được ghi 
 ### Câu 2
 Pipeline đưa hai nguồn về một schema như thế nào (đơn vị, kiểu thời gian, **độ lệch đồng hồ**)? Bằng chứng nào trong kết quả bước 2 cho thấy đã đúng? Dán bảng quarantine của bạn (số dòng theo từng lý do, từng drive) và giải thích vì sao dòng lỗi vào `rejects` thay vì bị xoá.
 
-(trả lời ở đây)
+**Cách pipeline đưa hai nguồn về một schema thống nhất:**
+- **Đơn vị đo**: Nguồn B đo vận tốc bằng `km/h` được quy đổi về `m/s` theo công thức `round(cast(spd_kmh as double) / 3.6, 3)`. Bàn đạp ga/phanh ở dạng phần trăm (`throttle_pct`, `brake_pct`) được chia cho 100 để về khoảng `[0.0, 1.0]`.
+- **Kiểu thời gian**: Nguồn A parse chuỗi ISO-8601 sang timestamp UTC. Nguồn B chuyển đổi từ epoch mili-giây sang timestamp UTC bằng hàm `epoch_ms(cast(timestamp_ms as bigint))`.
+- **Độ lệch đồng hồ (Clock Offset)**: Nguồn B khai báo bị lệch 1500 ms (1.5 giây) trong `sources.json`. Pipeline trừ độ lệch này: `ts - interval '1500 millisecond'` để khớp chính xác với mốc thời gian của camera video.
+
+**Bằng chứng đã xử lý đúng:**
+- Thời điểm bắt đầu của telemetry B (`min(ts)`) sau chuẩn hóa là `2025-10-08 14:30:00.009000+00:00`, trùng khớp hoàn toàn với thời điểm bắt đầu của video B (`2025-10-08 14:30:00`). Test tự động `drive B clock offset removed` đã đạt PASS.
+- Tốc độ tối đa sau khi quy đổi rất hợp lý: Drive A đạt tối đa 71 km/h (19.8 m/s), Drive B đạt tối đa 100 km/h (27.8 m/s).
+
+**Bảng quarantine (dữ liệu cách ly):**
+
+| drive_id | reject_reason | so_dong |
+|---|---|---|
+| drive_a | duplicate | 20 |
+| drive_a | speed_missing | 30 |
+| drive_a | speed_out_of_range | 3 |
+| drive_b | duplicate | 20 |
+| drive_b | speed_missing | 30 |
+| drive_b | speed_out_of_range | 3 |
+
+Tổng số dòng bị cách ly là 53 dòng mỗi drive (tổng 106 dòng). Số dòng sạch thu được: Drive A là 2968 dòng, Drive B là 3181 dòng. Tổng dòng sạch + cách ly đúng bằng tổng dòng nhận về từ Bronze (A: 2968 + 53 = 3021; B: 3181 + 53 = 3234).
+
+**Vì sao dòng lỗi vào `rejects` thay vì bị xóa:**
+- **Tránh mất mát dữ liệu âm thầm (Silent data loss)**: Xóa dòng lỗi làm mất khả năng kiểm toán (audit) và đối soát tổng số bản ghi giữa các tầng.
+- **Phục vụ phân tích nguyên nhân gốc (Root cause analysis)**: Lưu giữ các dòng lỗi kèm lý do (`reject_reason`) giúp kỹ sư dữ liệu phát hiện lỗi phần cứng, cảm biến mất kết nối hoặc firmware truyền sai định dạng.
+- **Bảo toàn dữ liệu (Data Lineage)**: Giữ nguyên vẹn quan hệ "Dữ liệu nhận = Dữ liệu sạch + Dữ liệu cách ly", cho phép sửa luật và re-process khi cần mà không mất mát thông tin.
 
 ### Câu 3
 Vì sao test `max_gap_ms` là `warn` còn `in_range` là `error`? Kết quả thí nghiệm `break-gate` của bạn (`break_gate.json`): test nào bắt được, bao nhiêu dòng, và điều đó cho biết gì về vai trò của "cổng chất lượng"?
 
-(trả lời ở đây)
+**Phân biệt `warn` và `error`:**
+- **`in_range` là `error` (dừng pipeline)**: Tốc độ xe ô tô thực tế bị giới hạn bởi quy luật vật lý (trong khoảng 0 đến 70 m/s, tương đương 0 - 252 km/h). Giá trị âm hoặc vượt quá 70 m/s chắc chắn là dữ liệu hỏng. Nếu đưa vào tầng Gold, mô hình AI lái xe tự động sẽ học sai quy luật vật lý và gây nguy hiểm chết người. Do đó vi phạm tính toàn vẹn này bắt buộc phải dừng pipeline ngay lập tức (`error`).
+- **`max_gap_ms` là `warn` (cảnh báo nhưng cho đi tiếp)**: Việc cảm biến bị trễ hoặc mất tín hiệu tạm thời (ví dụ xe chui vào hầm, bóng râm, mất sóng GPS trong vài giây) là hiện tượng vật lý bình thường khi vận hành thực tế ngoài đường. Cần gắn cảnh báo để theo dõi chất lượng kết nối, nhưng không thể vì mất tín hiệu vài giây mà huỷ bỏ toàn bộ dữ liệu hành trình xe (`warn`).
+
+**Kết quả thí nghiệm `break-gate` (`break_gate.json`):**
+- Khi nới lỏng luật từ 70 m/s lên 1000 m/s trong bước staging/silver, các giá trị tốc độ vô lý đã lọt vào bảng `silver_telemetry`.
+- Cổng chất lượng dbt test đã chặn lại thành công: Test `in_range_silver_telemetry_speed_mps__70__0` bị **FAIL** và bắt được chính xác **6 dòng** vi phạm (mỗi drive 3 dòng tốc độ dị biệt).
+- Kết quả test: `PASS=5 WARN=1 ERROR=1 SKIP=0`, pipeline dừng lại đúng như thiết kế, ngăn không cho dữ liệu bẩn lọt xuống downstream. Sau khi khôi phục luật, test trở lại `PASS=6 WARN=1 ERROR=0 SKIP=0`.
+
+**Vai trò của "cổng chất lượng" (Quality Gate):**
+- Là lá chắn tự động (automated guardrail) đảm bảo chỉ những dữ liệu đạt chuẩn độ tin cậy mới được nạp vào Gold để huấn luyện mô hình.
+- Giúp phát hiện sai sót sớm ngay tại ranh giới tầng dữ liệu (fail-fast), giảm thiểu chi phí khắc phục lỗi và ngăn chặn thảm họa suy luận sai lệch ở tầng AI/Robotics.
 
 ## Bước 3 · Silver frames
 
